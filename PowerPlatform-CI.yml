@@ -1,0 +1,553 @@
+# PowerPlatform Continuous Integration Pipeline (Solution & Schema Files)
+
+name: $(Project Name)_$(Date:yyyyMMdd)$(Rev:.r)
+trigger:
+- test
+
+variables:
+  Artefact1IsData: $[contains(variables['Artefact1'], 'xml')]
+  Artefact2IsData: $[contains(variables['Artefact2'], 'xml')]
+  Artefact3IsData: $[contains(variables['Artefact3'], 'xml')]
+  Artefact4IsData: $[contains(variables['Artefact4'], 'xml')]  
+  DeployPortal: $[contains(variables['Deploy Portal?'], 'Yes')] 
+  ExitPipeline: false  
+  -group: '$(Variable Group)'
+pool:
+  vmImage: windows-latest
+stages:
+- stage: Artefact1
+  condition: ne(variables.Artefact1,'')
+  jobs: 
+  - job: Artefact1Sln
+    condition: and(eq(variables.Artefact1IsData, 'false'),ne(variables.Artefact1, ''))
+    steps:
+    - script: echo BEGIN SOLUTION TRANSFER
+      displayName: 'Transfer your solution(s) across environments'    
+    - checkout: self
+      persistCredentials: true
+    - task: PowerPlatformToolInstaller@0
+      inputs:
+        DefaultVersion: true
+    - task: MSCRMToolInstaller@12
+      inputs:
+        nugetFeed: 'official'
+        psFeed: 'official'
+    - task: MSCRMCloneSolution@12      
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+        uniqueName: '$(Artefact1)'        
+    - task: PowerPlatformExportSolution@0      
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: '$(SourceSPN-DEV)'
+        SolutionName: '$(Artefact1)'
+        SolutionOutputFile: '$(Build.ArtifactStagingDirectory)\$(Artefact1).zip'
+        Managed: true
+        AsyncOperation: true
+        MaxAsyncWaitTime: '60'
+        ExportAutoNumberingSettings: true
+        ExportCalendarSettings: true
+        ExportCustomizationSettings: true
+        ExportEmailTrackingSettings: true
+        ExportGeneralSettings: true
+        ExportIsvConfig: true
+        ExportMarketingSettings: true
+        ExportOutlookSynchronizationSettings: true
+        ExportRelationshipRoles: true
+        ExportSales: true     
+    - task: PowerPlatformChecker@0
+      inputs:
+        PowerPlatformSPN: '$(SourceSPN-DEV)'
+        RuleSet: '0ad12346-e108-40b8-a956-9a8f95ea18c9'
+        FailOnPowerAppsCheckerAnalysisError: false
+        ArtifactDestinationName: 'SolutionAnalysisLogs'
+        FilesToAnalyze: '$(Build.ArtifactStagingDirectory)\$(Artefact1).zip'
+    - task: PowerPlatformUnpackSolution@0      
+      inputs:
+        SolutionInputFile: '$(Build.ArtifactStagingDirectory)\$(Artefact1).zip'
+        SolutionTargetFolder: '$(Build.SourcesDirectory)\Solutions\$(Artefact1)'
+        SolutionType: 'Managed'
+    - task: CmdLine@2      
+      inputs:
+        script: |
+          echo commit all changes
+          git config user.email $BUILD_REQUESTEDFOREMAIL
+          git config user.name "$BUILD_REQUESTEDFOR" # PowerPlatform
+          git config --system core.longpaths true
+          git checkout main
+          git add .
+          git commit -am "$(Comment)"
+          echo push code to new repo
+          git -c http.extraheader="AUTHORIZATION: bearer $(System.AccessToken)" push origin main
+    - script: echo END SOLUTION TRANSFER (SUCCESS)
+      displayName: 'Successfully Transferred your solution(s)'
+    - task: PowerPlatformPackSolution@0
+      inputs:
+        SolutionSourceFolder: '$(Build.SourcesDirectory)\Solutions\$(Artefact1)'
+        SolutionOutputFile: '$(Build.SourcesDirectory)\Solutions\$(Artefact1).zip'
+        SolutionType: 'Managed'
+    - task: PowerPlatformImportSolution@0      
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: '$(TargetSPN-DEV)'
+        SolutionInputFile: '$(Build.SourcesDirectory)\Solutions\$(Artefact1).zip'
+        AsyncOperation: true
+        MaxAsyncWaitTime: '60'
+    - script: echo FINISHED SOLN IMPORT!
+      displayName: 'PowerPlatform Solution Import Pipeline Completed Successfully'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'Sln'
+        publishLocation: 'Container'   
+    # - publish: $(System.DefaultWorkingDirectory)/Solutions/$(Artefact1).zip
+    #   artifact: Sln  
+    - task: PowerShell@2
+      name: "psJob"
+      inputs:
+        targetType: 'inline'
+        script: echo "##vso[task.setvariable variable=psJobVariable;isOutput=true]test.zip" 
+    - bash: |
+        echo AGENT_JOBSTATUS = $AGENT_JOBSTATUS
+        if [[ "$AGENT_JOBSTATUS" == "SucceededWithIssues" ]]; then exit 1; fi
+      displayName: Fail build if partially successful
+
+  - job: Artefact1Data          
+    condition: and(succeeded(), eq(variables.Artefact1IsData, 'true'), ne(variables.Artefact1,''))    
+    steps:
+    - script: echo BEGIN DATA TRANSFER
+      displayName: 'Transfer your data across environments'    
+    - checkout: self
+      persistCredentials: true
+    - task: MSCRMToolInstaller@12
+      inputs:
+        nugetFeed: 'official'
+        psFeed: 'official'
+    - task: MSCRMPing@12
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+    - task: MSCRMExportCMData@12
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+        schemaFile: 'Data/$(Artefact1)'
+        dataFile: 'Data/Exported-Data/Data.zip' 
+        logsDirectory: 'Logs/'
+    - task: MSCRMImportCMData@12
+      inputs:
+        crmConnectionString: '$(TargetConnection-DEV)'
+        dataFile: 'Data/Exported-Data/Data.zip' 
+        logsDirectory: 'Logs/'  
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'Data/Exported-Data/Data.zip' 
+        ArtifactName: 'Data'
+        publishLocation: 'Container'    
+    # - publish: $(System.ArtifactStagingDirectory)/Data/Exported-Data/Data.zip
+    #   artifact: Data              
+- stage: Artefact2
+  dependsOn: Artefact1
+  condition: and(ne(variables.Artefact2,''),in(dependencies.Artefact1.result, 'Succeeded', 'Skipped'))
+  jobs: 
+  - job: Artefact2Sln          
+    condition: and(succeeded(), eq(variables.Artefact2IsData, 'false'),ne(variables.Artefact2, ''))
+    steps:
+    - script: echo BEGIN SOLUTION TRANSFER
+      displayName: 'Transfer your solution(s) across environments'    
+    - checkout: self
+      persistCredentials: true
+
+    - task: PowerPlatformToolInstaller@0
+      inputs:
+        DefaultVersion: true
+    - task: MSCRMToolInstaller@12
+      inputs:
+        nugetFeed: 'official'
+        psFeed: 'official'
+    - task: MSCRMCloneSolution@12
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+        uniqueName: '$(Artefact2)'
+    - task: PowerPlatformExportSolution@0
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: '$(SourceSPN-DEV)'
+        SolutionName: '$(Artefact2)'
+        SolutionOutputFile: '$(Build.ArtifactStagingDirectory)\$(Artefact2).zip'
+        Managed: true
+        AsyncOperation: true
+        MaxAsyncWaitTime: '60'
+        ExportAutoNumberingSettings: true
+        ExportCalendarSettings: true
+        ExportCustomizationSettings: true
+        ExportEmailTrackingSettings: true
+        ExportGeneralSettings: true
+        ExportIsvConfig: true
+        ExportMarketingSettings: true
+        ExportOutlookSynchronizationSettings: true
+        ExportRelationshipRoles: true
+        ExportSales: true      
+    - task: PowerPlatformChecker@0
+      inputs:
+        PowerPlatformSPN: '$(SourceSPN-DEV)'
+        RuleSet: '0ad12346-e108-40b8-a956-9a8f95ea18c9'
+        FailOnPowerAppsCheckerAnalysisError: false
+        ArtifactDestinationName: 'SolutionAnalysisLogs'
+        FilesToAnalyze: '$(Build.ArtifactStagingDirectory)\$(Artefact2).zip'
+    - task: PowerPlatformUnpackSolution@0
+      inputs:
+        SolutionInputFile: '$(Build.ArtifactStagingDirectory)\$(Artefact2).zip'
+        SolutionTargetFolder: '$(Build.SourcesDirectory)\Solutions\$(Artefact2)'
+        SolutionType: 'Managed'
+    - task: CmdLine@2
+      inputs:
+        script: |
+          echo commit all changes
+          git config user.email $BUILD_REQUESTEDFOREMAIL
+          git config user.name "$BUILD_REQUESTEDFOR" # PowerPlatform
+          git config --system core.longpaths true
+          git checkout main
+          git add .
+          git commit -am "@(Comment)"
+          echo push code to new repo
+          git -c http.extraheader="AUTHORIZATION: bearer $(System.AccessToken)" push origin main
+    - script: echo END SOLUTION TRANSFER (SUCCESS)
+      displayName: 'Successfully Transferred your solution(s)'
+    - task: PowerPlatformPackSolution@0
+      inputs:
+        SolutionSourceFolder: '$(Build.SourcesDirectory)\Solutions\$(Artefact2)'
+        SolutionOutputFile: '$(Build.SourcesDirectory)\Solutions\$(Artefact2).zip'
+        SolutionType: 'Managed'
+    - task: PowerPlatformImportSolution@0      
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: '$(TargetSPN-DEV)'
+        SolutionInputFile: '$(Build.SourcesDirectory)\Solutions\$(Artefact2).zip'
+        AsyncOperation: true
+        MaxAsyncWaitTime: '60'
+    - script: echo FINISHED SOLN IMPORT!
+      displayName: 'PowerPlatform Solution Import Pipeline Completed Successfully'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'Sln2'
+        publishLocation: 'Container'
+    # - publish: $(System.ArtifactStagingDirectory)/Solutions/$(Artefact2).zip
+    #   artifact: Sln2
+  - job: Artefact2Data     
+    condition: and(succeeded(),eq(variables.Artefact2IsData, 'true'),ne(variables.Artefact2, ''))
+    steps:
+    - script: echo BEGIN DATA TRANSFER
+      displayName: 'Transfer your solution(s) across environments'    
+    - checkout: self
+      persistCredentials: true
+    - task: MSCRMToolInstaller@12
+      inputs:
+        nugetFeed: 'official'
+        psFeed: 'official'
+    - task: MSCRMPing@12
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+    - task: MSCRMExportCMData@12      
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+        schemaFile: 'Data/$(Artefact2)'
+        dataFile: 'Data/Exported-Data/Data.zip'        
+    - task: MSCRMImportCMData@12
+      inputs:
+        crmConnectionString: '$(TargetConnection-DEV)'
+        dataFile: 'Data/Exported-Data/Data.zip'        
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'Data/Exported-Data/Data.zip' 
+        ArtifactName: 'Data2'
+        publishLocation: 'Container'     
+    # - publish: $(System.ArtifactStagingDirectory)/Data/Exported-Data/Data.zip
+    #   artifact: Data2     
+- stage: Artefact3
+  dependsOn:
+    - Artefact1
+    - Artefact2
+  condition: and(ne(variables.Artefact3,''),in(dependencies.Artefact2.result, 'Succeeded', 'Skipped'),in(dependencies.Artefact1.result, 'Succeeded', 'Skipped'))
+  jobs: 
+  - job: Artefact3Sln    
+    condition: and(succeeded(),eq(variables.Artefact3IsData, 'false'),ne(variables.Artefact3, ''))
+    steps:
+    - script: echo BEGIN SOLUTION TRANSFER
+      displayName: 'Transfer your solution(s) across environments'    
+    - checkout: self
+      persistCredentials: true
+
+    - task: PowerPlatformToolInstaller@0
+      inputs:
+        DefaultVersion: true
+    - task: MSCRMToolInstaller@12
+      inputs:
+        nugetFeed: 'official'
+        psFeed: 'official'
+    - task: MSCRMCloneSolution@12
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+        uniqueName: '$(Artefact3)'
+    - task: PowerPlatformExportSolution@0
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: '$(SourceSPN-DEV)'
+        SolutionName: '$(Artefact3)'
+        SolutionOutputFile: '$(Build.ArtifactStagingDirectory)\$(Artefact3).zip'
+        Managed: true
+        AsyncOperation: true
+        MaxAsyncWaitTime: '60'
+        ExportAutoNumberingSettings: true
+        ExportCalendarSettings: true
+        ExportCustomizationSettings: true
+        ExportEmailTrackingSettings: true
+        ExportGeneralSettings: true
+        ExportIsvConfig: true
+        ExportMarketingSettings: true
+        ExportOutlookSynchronizationSettings: true
+        ExportRelationshipRoles: true
+        ExportSales: true      
+    - task: PowerPlatformChecker@0
+      inputs:
+        PowerPlatformSPN: '$(SourceSPN-DEV)'
+        RuleSet: '0ad12346-e108-40b8-a956-9a8f95ea18c9'
+        FailOnPowerAppsCheckerAnalysisError: false
+        ArtifactDestinationName: 'SolutionAnalysisLogs'
+        FilesToAnalyze: '$(Build.ArtifactStagingDirectory)\$(Artefact3).zip'
+
+    - task: PowerPlatformUnpackSolution@0
+      inputs:
+        SolutionInputFile: '$(Build.ArtifactStagingDirectory)\$(Artefact3).zip'
+        SolutionTargetFolder: '$(Build.SourcesDirectory)\Solutions\$(Artefact3)'
+        SolutionType: 'Managed'
+    - task: CmdLine@2
+      inputs:
+        script: |
+          echo commit all changes
+          git config user.email $BUILD_REQUESTEDFOREMAIL
+          git config user.name "$BUILD_REQUESTEDFOR" # PowerPlatform
+          git config --system core.longpaths true
+          git checkout main
+          git add .
+          git commit -am "@(Comment)"
+          echo push code to new repo
+          git -c http.extraheader="AUTHORIZATION: bearer $(System.AccessToken)" push origin main
+    - script: echo END SOLUTION TRANSFER (SUCCESS)
+      displayName: 'Successfully Transferred your solution(s)'
+    - task: PowerPlatformPackSolution@0
+      inputs:
+        SolutionSourceFolder: '$(Build.SourcesDirectory)\Solutions\$(Artefact3)'
+        SolutionOutputFile: '$(Build.SourcesDirectory)\Solutions\$(Artefact3).zip'
+        SolutionType: 'Managed'
+    - task: PowerPlatformImportSolution@0      
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: '$(TargetSPN-DEV)'
+        SolutionInputFile: '$(Build.SourcesDirectory)\Solutions\$(Artefact3).zip'
+        AsyncOperation: true
+        MaxAsyncWaitTime: '60'
+
+    - script: echo FINISHED SOLN IMPORT!
+      displayName: 'PowerPlatform Solution Import Pipeline Completed Successfully'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'Sln3'
+        publishLocation: 'Container'
+    # - publish: $(System.ArtifactStagingDirectory)/Solutions/$(Artefact3).zip
+    #   artifact: Sln3
+  - job: Artefact3Data    
+    condition: and(succeeded(),eq(variables.Artefact3IsData, 'true'),ne(variables.Artefact3, ''))
+    steps:
+    - script: echo BEGIN SOLUTION TRANSFER
+      displayName: 'Transfer your solution(s) across environments'    
+    - checkout: self
+      persistCredentials: true
+  
+    - task: MSCRMToolInstaller@12
+      inputs:
+        nugetFeed: 'official'
+        psFeed: 'official'
+    - task: MSCRMPing@12
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+
+    - task: MSCRMExportCMData@12      
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+        schemaFile: '/Data/$(Artefact3)'
+        dataFile: '/Data/Exported-Data/Data.zip'        
+    - task: MSCRMImportCMData@12
+      inputs:
+        crmConnectionString: '$(TargetConnection-DEV)'
+        dataFile: '/Data/Exported-Data/Data.zip'                            
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'Data/Exported-Data/Data.zip' 
+        ArtifactName: 'Data3'
+        publishLocation: 'Container'
+    # - publish: $(System.ArtifactStagingDirectory)/Data/Exported-Data/Data.zip
+    #   artifact: Data3
+- stage: Artefact4
+  dependsOn:
+    - Artefact1
+    - Artefact2
+    - Artefact3
+  condition: and(ne(variables.Artefact4,''),in(dependencies.Artefact2.result, 'Succeeded', 'Skipped'),in(dependencies.Artefact1.result, 'Succeeded', 'Skipped'),in(dependencies.Artefact3.result, 'Succeeded', 'Skipped'))
+  jobs: 
+  - job: Artefact4Sln    
+    condition: and(succeeded(),eq(variables.Artefact4IsData, 'false'), ne(variables.Artefact4, ''))
+    steps:
+    - script: echo BEGIN SOLUTION TRANSFER
+      displayName: 'Transfer your solution(s) across environments'    
+    - checkout: self
+      persistCredentials: true
+    - task: PowerPlatformToolInstaller@0
+      inputs:
+        DefaultVersion: true
+    - task: MSCRMToolInstaller@12
+      inputs:
+        nugetFeed: 'official'
+        psFeed: 'official'
+    - task: MSCRMCloneSolution@12
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+        uniqueName: '$(Artefact4)'
+    - task: PowerPlatformExportSolution@0
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: '$(SourceSPN-DEV)'
+        SolutionName: '$(Artefact4)'
+        SolutionOutputFile: '$(Build.ArtifactStagingDirectory)\$(Artefact4).zip'
+        Managed: true
+        AsyncOperation: true
+        MaxAsyncWaitTime: '60'
+        ExportAutoNumberingSettings: true
+        ExportCalendarSettings: true
+        ExportCustomizationSettings: true
+        ExportEmailTrackingSettings: true
+        ExportGeneralSettings: true
+        ExportIsvConfig: true
+        ExportMarketingSettings: true
+        ExportOutlookSynchronizationSettings: true
+        ExportRelationshipRoles: true
+        ExportSales: true      
+    - task: PowerPlatformChecker@0
+      inputs:
+        PowerPlatformSPN: '$(SourceSPN-DEV)'
+        RuleSet: '0ad12346-e108-40b8-a956-9a8f95ea18c9'
+        FailOnPowerAppsCheckerAnalysisError: false
+        ArtifactDestinationName: 'SolutionAnalysisLogs'
+        FilesToAnalyze: '$(Build.ArtifactStagingDirectory)\$(Artefact4).zip'
+    - task: PowerPlatformUnpackSolution@0
+      inputs:
+        SolutionInputFile: '$(Build.ArtifactStagingDirectory)\$(Artefact4).zip'
+        SolutionTargetFolder: '$(Build.SourcesDirectory)\Solutions\$(Artefact4)'
+        SolutionType: 'Managed'
+    - task: CmdLine@2
+      inputs:
+        script: |
+          echo commit all changes
+          git config user.email $BUILD_REQUESTEDFOREMAIL
+          git config user.name "$BUILD_REQUESTEDFOR" # PowerPlatform
+          git config --system core.longpaths true
+          git checkout main
+          git add .
+          git commit -am "@Comment"
+          echo push code to new repo
+          git -c http.extraheader="AUTHORIZATION: bearer $(System.AccessToken)" push origin main
+    - script: echo END SOLUTION TRANSFER (SUCCESS)
+      displayName: 'Successfully Transferred your solution(s)'
+    - task: PowerPlatformPackSolution@0
+      inputs:
+        SolutionSourceFolder: '$(Build.SourcesDirectory)\Solutions\$(Artefact4)'
+        SolutionOutputFile: '$(Build.SourcesDirectory)\Solutions\$(Artefact4).zip'
+        SolutionType: 'Managed'
+    - task: PowerPlatformImportSolution@0      
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: '$(TargetSPN-DEV)'
+        SolutionInputFile: '$(Build.SourcesDirectory)\Solutions\$(Artefact4).zip'
+        AsyncOperation: true
+        MaxAsyncWaitTime: '60'
+    - script: echo FINISHED SOLN IMPORT!
+      displayName: 'PowerPlatform Solution Import Pipeline Completed Successfully'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'Sln4'
+        publishLocation: 'Container'
+    # - publish: $(System.ArtifactStagingDirectory)/Solutions/$(Artefact4).zip
+    #   artifact: Sln4
+  - job: Artefact4Data    
+    condition: and(succeeded(),eq(variables.Artefact4IsData, 'true'),ne(variables.Artefact4, ''))
+    steps:
+    - script: echo BEGIN DATA TRANSFER
+      displayName: 'Transfer your data(s) across environments'    
+    - checkout: self
+      persistCredentials: true    
+    - task: MSCRMToolInstaller@12
+      inputs:
+        nugetFeed: 'official'
+        psFeed: 'official'
+    - task: MSCRMPing@12
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+    - task: MSCRMExportCMData@12      
+      inputs:
+        crmConnectionString: '$(SourceConnection-DEV)'
+        schemaFile: 'Data/$(Artefact4)'
+        dataFile: 'Data/Exported-Data/Data.zip'        
+    - task: MSCRMImportCMData@12
+      inputs:
+        crmConnectionString: '$(TargetConnection-DEV)'
+        dataFile: 'Data/Exported-Data/Data.zip'                         
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'Data/Exported-Data/Data.zip' 
+        ArtifactName: 'Data4'
+        publishLocation: 'Container'
+    # - publish: $(System.ArtifactStagingDirectory)/Data/Exported-Data/Data.zip
+    #   artifact: Data4
+- stage: Portals 
+  dependsOn:
+    - Artefact1
+    - Artefact2
+    - Artefact3
+    - Artefact4 
+  condition: and(eq(variables.DeployPortal, 'true'),in(dependencies.Artefact2.result, 'Succeeded', 'Skipped'),in(dependencies.Artefact1.result, 'Succeeded', 'Skipped'),in(dependencies.Artefact3.result, 'Succeeded', 'Skipped'),in(dependencies.Artefact4.result, 'Succeeded', 'Skipped'))
+  jobs: 
+  - job: DeployPortal
+    condition: succeeded()        
+    steps:
+    - checkout: self
+      persistCredentials: true
+    - task: PowerShell@2    
+      inputs:
+        filePath: '$(Build.SourcesDirectory)\Pipeline-Scripts\PortalMigration.ps1'  
+        arguments: -SourceURL '$(SourceURL-DEV)' -TargetURL '$(TargetURL-DEV)' -ClientID '$(ClientID)' -ClientSecret '$(Secret)' -TenantID '$(TenantID)' -DeploymentProfile '$(DeploymentProfile-TEST)' -PortalName 'customer-self-service' -PortalSourceRootDirectory 'Portals'
+    - script: |
+        echo Portal Deployment Script Completed. Commencing GIT commit and artefact storage
+      displayName: 'Portal Deployment Completed'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: $(Build.SourcesDirectory)\Portals
+        ArtifactName: 'Portal'
+        publishLocation: 'Container'
+    - task: CmdLine@2
+      inputs:
+        script: |
+          echo commit all changes
+          git config user.email $BUILD_REQUESTEDFOREMAIL
+          git config user.name "$BUILD_REQUESTEDFOR" # PowerPlatform
+          git config --system core.longpaths true
+          git checkout main
+          git rm -r Portals/customer-self-service/advanced-forms
+          git add .
+          git commit -am "Portal Commit"
+          echo push code to new repo
+          git -c http.extraheader="AUTHORIZATION: bearer $(System.AccessToken)" push origin main
+    - script: |
+        echo Repository Updated.
+      displayName: 'Repository Updated'   
+
